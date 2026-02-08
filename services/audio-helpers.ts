@@ -26,7 +26,8 @@ export async function decodeAudioData(
   sampleRate: number,
   numChannels: number,
 ): Promise<AudioBuffer> {
-  const dataInt16 = new Int16Array(data.buffer);
+  // Use explicit offset and length to avoid buffer alignment issues
+  const dataInt16 = new Int16Array(data.buffer, data.byteOffset, data.byteLength / 2);
   const frameCount = dataInt16.length / numChannels;
   const buffer = ctx.createBuffer(numChannels, frameCount, sampleRate);
 
@@ -43,10 +44,13 @@ export function createBlob(data: Float32Array): GeminiBlob {
   const l = data.length;
   const int16 = new Int16Array(l);
   for (let i = 0; i < l; i++) {
-    int16[i] = data[i] * 32768;
+    // Clamp values to valid Int16 range
+    const s = Math.max(-1, Math.min(1, data[i]));
+    int16[i] = s < 0 ? s * 32768 : s * 32767;
   }
   return {
-    data: encode(new Uint8Array(int16.buffer)),
+    // Correctly slice the buffer to match the Int16Array length
+    data: encode(new Uint8Array(int16.buffer, int16.byteOffset, int16.byteLength)),
     mimeType: 'audio/pcm;rate=16000',
   };
 }
