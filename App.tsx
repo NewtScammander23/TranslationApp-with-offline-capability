@@ -74,16 +74,14 @@ const App: React.FC = () => {
     setStatus(ConnectionStatus.CONNECTING);
 
     try {
-      // Check for key selection bridge
-      if (typeof window !== 'undefined' && (window as any).aistudio) {
+      // Manual fallback if environment variable is missing in client-side bridge
+      if (!process.env.API_KEY && typeof window !== 'undefined' && (window as any).aistudio) {
         const hasKey = await (window as any).aistudio.hasSelectedApiKey();
         if (!hasKey) {
           await (window as any).aistudio.openSelectKey();
-          // Race condition mitigation: Proceed immediately after trigger
         }
       }
 
-      // Always create a fresh instance to ensure latest key is used
       const apiKey = process.env.API_KEY || '';
       const ai = new GoogleGenAI({ apiKey });
       
@@ -97,14 +95,14 @@ const App: React.FC = () => {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
 
       const modeInstruction = mode === AppMode.TRANSLATE 
-        ? "PURE TRANSLATION MODE: Professional English-Filipino translator. Output ONLY the translation. No conversation."
-        : "CHAT MODE: You are Salin, a friendly English-Filipino assistant.";
+        ? "PURE TRANSLATION MODE: You are an expert English-Filipino (Tagalog) interpreter. If the user speaks English, translate to Filipino. If the user speaks Filipino, translate to English. Output ONLY the translation. Speak naturally and avoid robotic phrasing."
+        : "CHAT MODE: You are Salin, a witty and helpful English-Filipino assistant. You love mixing both languages (Taglish) unless asked otherwise.";
 
       const sessionPromise = ai.live.connect({
         model: 'gemini-2.5-flash-native-audio-preview-12-2025',
         config: {
           responseModalities: [Modality.AUDIO],
-          systemInstruction: `${modeInstruction} ${isPoliteMode ? 'Use polite Filipino (po/opo).' : ''} Wake word: 'Hoy Salin'.`,
+          systemInstruction: `${modeInstruction} ${isPoliteMode ? 'Always use "po" and "opo" in Filipino.' : 'Use casual, natural phrasing.'} Wake word: 'Hoy Salin'.`,
           speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Kore' } } },
           outputAudioTranscription: {},
           inputAudioTranscription: {},
@@ -152,7 +150,7 @@ const App: React.FC = () => {
             if (message.serverContent?.inputTranscription) {
               const text = message.serverContent.inputTranscription.text.toLowerCase();
               transcriptionRef.current.input += text;
-              if (text.includes("salin")) setIsAwake(true);
+              if (text.includes("salin") || text.includes("hoy")) setIsAwake(true);
             }
             if (message.serverContent?.outputTranscription) {
               transcriptionRef.current.output += message.serverContent.outputTranscription.text;
@@ -175,16 +173,19 @@ const App: React.FC = () => {
           onerror: (e: any) => {
             console.error('Session error:', e);
             
-            // Critical recovery: If entity not found (usually API key issue), prompt user again
-            if (e.message?.includes('Requested entity was not found') || e.message?.includes('not found')) {
+            if (e.message?.includes('429') || e.message?.toLowerCase().includes('quota')) {
+              setErrorMessage('Free tier limit reached. Please wait a moment.');
+            } else if (e.message?.includes('404') || e.message?.includes('not found')) {
+               setErrorMessage('Model not found. Please re-select your API key.');
                (window as any).aistudio?.openSelectKey();
+            } else {
+              setErrorMessage(e.message || 'Connection failed.');
             }
 
-            if (retryCountRef.current < MAX_RETRIES) {
+            if (retryCountRef.current < MAX_RETRIES && !e.message?.includes('429')) {
               retryCountRef.current++;
-              setTimeout(startSession, 1500);
+              setTimeout(startSession, 2000);
             } else {
-              setErrorMessage(e.message || 'Connection failed. Check API Key.');
               setStatus(ConnectionStatus.ERROR);
               stopSession();
             }
@@ -196,7 +197,7 @@ const App: React.FC = () => {
     } catch (err: any) {
       console.error('Start error:', err);
       setStatus(ConnectionStatus.ERROR);
-      setErrorMessage(err.message || 'Connection error.');
+      setErrorMessage(err.message || 'Failed to start microphone.');
       isConnectingRef.current = false;
     }
   };
@@ -226,9 +227,11 @@ const App: React.FC = () => {
       </div>
 
       {status === ConnectionStatus.ERROR && (
-        <div className="px-6 py-3 bg-red-50 border-b border-red-100">
-          <p className="text-[10px] font-bold text-red-700 uppercase mb-1">Status Error</p>
-          <p className="text-[11px] text-red-600 leading-tight">{errorMessage}</p>
+        <div className="px-6 py-3 bg-red-50 border-b border-red-100 animate-in slide-in-from-top duration-300">
+          <p className="text-[10px] font-bold text-red-700 uppercase mb-1 flex items-center">
+            <span className="mr-1">⚠️</span> Error
+          </p>
+          <p className="text-[11px] text-red-600 leading-tight font-medium">{errorMessage}</p>
         </div>
       )}
 
@@ -250,15 +253,15 @@ const App: React.FC = () => {
         >
           {status === ConnectionStatus.CONNECTING ? 'Connecting...' : 
            status === ConnectionStatus.CONNECTED ? (isAwake ? 'End Session' : 'Wake Up Salin') :
-           'Start Translator'}
+           'Start Salin'}
         </button>
         <div className="mt-4 flex flex-col items-center space-y-1">
           <p className="text-[10px] text-slate-400 font-bold uppercase tracking-widest">
-            {isAwake ? "Listening for speech..." : "Tap to start voice activation"}
+            {isAwake ? "Salin is listening..." : "Tap to activate voice translator"}
           </p>
           {!process.env.API_KEY && (
             <button onClick={() => (window as any).aistudio?.openSelectKey()} className="text-[9px] text-indigo-500 font-bold uppercase underline">
-              Update API Key
+              Manage API Key
             </button>
           )}
         </div>
