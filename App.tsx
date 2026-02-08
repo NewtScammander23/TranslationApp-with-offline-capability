@@ -12,7 +12,11 @@ const RETRY_DELAY_BASE = 2000;
 const App: React.FC = () => {
   const [status, setStatus] = useState<ConnectionStatus>(ConnectionStatus.IDLE);
   const [mode, setMode] = useState<AppMode>(AppMode.TRANSLATE);
-  const [history, setHistory] = useState<TranscriptionEntry[]>([]);
+  
+  // Separated Histories
+  const [translateHistory, setTranslateHistory] = useState<TranscriptionEntry[]>([]);
+  const [chatHistory, setChatHistory] = useState<TranscriptionEntry[]>([]);
+  
   const [isSpeaking, setIsSpeaking] = useState(false);
   const [isAwake, setIsAwake] = useState(false);
   const [volume, setVolume] = useState(0);
@@ -113,30 +117,18 @@ const App: React.FC = () => {
       });
 
       const modeInstruction = mode === AppMode.TRANSLATE 
-        ? "PURE TRANSLATION MODE: You are a focused English-Filipino translator. If input is English, output Filipino. If input is Filipino, output English. Output ONLY the translation. Do not provide extra conversational text or explanations. Your goal is precision and speed."
-        : `CHAT MODE: You are 'Salin', a lively, bubbly, and incredibly friendly Filipino-English bilingual companion. 
-           You feel like a human 'bestie' (bes) who is genuinely excited to chat. 
-           Use expressive Filipino reactions like 'Wow!', 'Grabe!', 'Uy!', 'Talaga?', and 'Hala!'. 
-           Share small opinions or friendly remarks. Be empathetic and warm. 
-           Even as a friend, remain polite. 
-           ${isPoliteMode ? "Since Polite Mode is ON, act like a very respectful 'bunso' or sibling—use 'po' and 'opo' constantly, but keep the vibe fun and energetic." : "Since Polite Mode is OFF, be a chill, casual best friend."}`;
+        ? "PURE TRANSLATION MODE: You are a professional English-Filipino translator. Output ONLY the translation. No conversational filler. Precision is your priority."
+        : `CHAT MODE: You are 'Salin', a bubbly Filipino-English bestie. Be human-like, expressive, and lively! Use Filipino slang and reactions. 
+           ${isPoliteMode ? "Act like a respectful sibling, use 'po' and 'opo' always but stay energetic." : "Be a casual friend."}`;
 
       const sessionPromise = ai.live.connect({
         model: 'gemini-2.5-flash-native-audio-preview-12-2025',
         config: {
           responseModalities: [Modality.AUDIO],
           systemInstruction: `You are 'Salin'. ${modeInstruction}
-          
           WAKE PHRASES: "Hey Salin", "Hoy Salin", "Kamusta Salin", "What's up Salin".
-          
-          EMOTION PROTOCOL:
-          - Detect user emotion accurately. 
-          - Prefix EVERY output transcription with: [HAPPY], [SAD], [ANGRY], [SURPRISED], or [COOL].
-          
-          POLITENESS PROTOCOL (Paggalang):
-          ${isPoliteMode ? "- You MUST use 'po' and 'opo' in all your Filipino responses. It is critical to sound respectful to the user." : "- Use natural, casual Filipino without 'po' or 'opo' unless the user is much older."}
-          
-          STATE: Start in STANDBY. Only respond when addressed by name or when the conversation is active.`,
+          Prefix output transcription with moods: [HAPPY], [SAD], [ANGRY], [SURPRISED], or [COOL].
+          ${isPoliteMode ? "MUST use 'po/opo' in Filipino." : "Natural casual Filipino."}`,
           speechConfig: {
             voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Kore' } },
           },
@@ -188,7 +180,7 @@ const App: React.FC = () => {
             if (message.serverContent?.inputTranscription) {
               const text = message.serverContent.inputTranscription.text.toLowerCase();
               transcriptionRef.current.input += text;
-              const wakeTriggers = ["hey salin", "hoy salin", "kamusta salin", "what's up salin", "sali"];
+              const wakeTriggers = ["hey salin", "hoy salin", "kamusta salin", "what's up salin"];
               if (!isAwake && wakeTriggers.some(t => text.includes(t))) {
                 setIsAwake(true);
                 transcriptionRef.current.input = ''; 
@@ -198,7 +190,6 @@ const App: React.FC = () => {
             if (message.serverContent?.outputTranscription) {
               const text = message.serverContent.outputTranscription.text;
               transcriptionRef.current.output += text;
-              
               const moods = ['HAPPY', 'SAD', 'ANGRY', 'SURPRISED', 'COOL'] as const;
               for (const m of moods) {
                 if (text.includes(`[${m}]`)) {
@@ -211,25 +202,27 @@ const App: React.FC = () => {
             if (message.serverContent?.turnComplete) {
               const userText = transcriptionRef.current.input.trim();
               let modelText = transcriptionRef.current.output.trim();
-              
               modelText = modelText.replace(/\[(HAPPY|SAD|ANGRY|SURPRISED|COOL|NEUTRAL)\]/gi, '').trim();
 
-              if (userText && isAwake) {
-                setHistory(prev => [...prev, {
+              const currentMode = mode; // Capture for closure safety
+              const addEntry = (speaker: 'user' | 'model', text: string) => {
+                const entry: TranscriptionEntry = {
                   id: Math.random().toString(36).substr(2, 9),
-                  speaker: 'user',
-                  text: userText,
-                  timestamp: new Date()
-                }]);
-              }
-              if (modelText) {
-                setHistory(prev => [...prev, {
-                  id: Math.random().toString(36).substr(2, 9),
-                  speaker: 'model',
-                  text: modelText,
-                  timestamp: new Date()
-                }]);
-              }
+                  speaker,
+                  text,
+                  timestamp: new Date(),
+                  mode: currentMode
+                };
+                if (currentMode === AppMode.TRANSLATE) {
+                  setTranslateHistory(prev => [...prev, entry]);
+                } else {
+                  setChatHistory(prev => [...prev, entry]);
+                }
+              };
+
+              if (userText && isAwake) addEntry('user', userText);
+              if (modelText) addEntry('model', modelText);
+              
               transcriptionRef.current = { input: '', output: '' };
             }
 
@@ -242,16 +235,12 @@ const App: React.FC = () => {
           },
           onerror: (e) => {
             console.error('Salin Session Error:', e);
-            const isUnavailable = e.message?.toLowerCase().includes('unavailable') || e.message?.toLowerCase().includes('busy');
-            
-            if (isUnavailable && retryCountRef.current < MAX_RETRIES) {
+            if (retryCountRef.current < MAX_RETRIES) {
               retryCountRef.current++;
               setStatus(ConnectionStatus.RECONNECTING);
               const delay = RETRY_DELAY_BASE * Math.pow(2, retryCountRef.current - 1);
               if (retryTimeoutRef.current) window.clearTimeout(retryTimeoutRef.current);
-              retryTimeoutRef.current = window.setTimeout(() => {
-                startSession();
-              }, delay);
+              retryTimeoutRef.current = window.setTimeout(() => startSession(), delay);
             } else {
               setStatus(ConnectionStatus.ERROR);
               stopSession();
@@ -277,17 +266,13 @@ const App: React.FC = () => {
       retryCountRef.current = 0;
       startSession();
     } else if (status === ConnectionStatus.CONNECTED || status === ConnectionStatus.RECONNECTING) {
-      if (!isAwake) {
-        setIsAwake(true);
-      } else {
-        stopSession();
-      }
+      if (!isAwake) setIsAwake(true);
+      else stopSession();
     }
   };
 
   const togglePoliteMode = () => {
-    const nextVal = !isPoliteMode;
-    setIsPoliteMode(nextVal);
+    setIsPoliteMode(!isPoliteMode);
     if (status === ConnectionStatus.CONNECTED || status === ConnectionStatus.RECONNECTING) {
       stopSession();
       setTimeout(() => startSession(), 100);
@@ -297,6 +282,7 @@ const App: React.FC = () => {
   const switchMode = (newMode: AppMode) => {
     if (newMode === mode) return;
     setMode(newMode);
+    // When switching modes, we restart session to update system instructions
     if (status === ConnectionStatus.CONNECTED || status === ConnectionStatus.RECONNECTING) {
       stopSession();
       setTimeout(() => startSession(), 100);
@@ -384,7 +370,8 @@ const App: React.FC = () => {
           </div>
         )}
 
-        <TranscriptionList entries={history} />
+        {/* Display history based on current mode */}
+        <TranscriptionList entries={mode === AppMode.TRANSLATE ? translateHistory : chatHistory} />
       </main>
 
       <footer className="p-6 bg-white/80 backdrop-blur-md border-t border-gray-100 sticky bottom-0 z-20">
