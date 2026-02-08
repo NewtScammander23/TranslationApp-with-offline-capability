@@ -67,7 +67,7 @@ const App: React.FC = () => {
 
   const startSession = async () => {
     if (!isOnline) {
-      setErrorMessage('Please check your internet connection.');
+      setErrorMessage('Offline: Check your internet connection.');
       setStatus(ConnectionStatus.ERROR);
       return;
     }
@@ -78,7 +78,7 @@ const App: React.FC = () => {
     setStatus(ConnectionStatus.CONNECTING);
 
     try {
-      // Mandatory for high-tier preview models: trigger key selection if not found
+      // Logic for AI Studio preview environment
       if (typeof window !== 'undefined' && (window as any).aistudio) {
         const hasKey = await (window as any).aistudio.hasSelectedApiKey();
         if (!hasKey) {
@@ -86,28 +86,31 @@ const App: React.FC = () => {
         }
       }
 
-      // Initialize SDK exactly before use with current API_KEY from environment
-      const ai = new GoogleGenAI({ apiKey: process.env.API_KEY || '' });
+      const apiKey = process.env.API_KEY || '';
+      if (!apiKey) {
+        throw new Error("API Key is not configured. Please check your environment variables.");
+      }
+
+      const ai = new GoogleGenAI({ apiKey });
       
       const AudioCtx = (window.AudioContext || (window as any).webkitAudioContext);
       inputAudioCtxRef.current = new AudioCtx({ sampleRate: 16000 });
       outputAudioCtxRef.current = new AudioCtx({ sampleRate: 24000 });
       
-      // Ensure contexts are resumed after user gesture
       await inputAudioCtxRef.current.resume();
       await outputAudioCtxRef.current.resume();
 
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
 
       const modeInstruction = mode === AppMode.TRANSLATE 
-        ? "PURE TRANSLATION MODE: You are an expert English-Filipino interpreter. If user speaks English, translate to Tagalog. If user speaks Tagalog, translate to English. Output ONLY the translation without chatter."
+        ? "PURE TRANSLATION MODE: You are an expert speech-to-speech interpreter. If you hear English, speak Filipino. If you hear Filipino, speak English. Output ONLY the translation. Never add your own commentary or chatter. Be very fast."
         : "CHAT MODE: You are Salin, a friendly English-Filipino assistant who uses natural 'Taglish'.";
 
       const sessionPromise = ai.live.connect({
         model: 'gemini-2.5-flash-native-audio-preview-12-2025',
         config: {
           responseModalities: [Modality.AUDIO],
-          systemInstruction: `${modeInstruction} ${isPoliteMode ? 'Be very polite (po/opo).' : 'Be casual and natural.'} Wake word is 'Hoy Salin'.`,
+          systemInstruction: `${modeInstruction} ${isPoliteMode ? 'Use po and opo consistently.' : 'Be casual.'} Wake word is 'Salin'.`,
           speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Kore' } } },
           outputAudioTranscription: {},
           inputAudioTranscription: {},
@@ -115,6 +118,7 @@ const App: React.FC = () => {
         callbacks: {
           onopen: () => {
             setStatus(ConnectionStatus.CONNECTED);
+            setIsAwake(true); // Auto-wake on start for better mobile experience
             isConnectingRef.current = false;
             retryCountRef.current = 0;
             
@@ -126,12 +130,10 @@ const App: React.FC = () => {
               const inputData = e.inputBuffer.getChannelData(0);
               const pcmBlob = createBlob(inputData);
               
-              // Use sessionPromise directly as per SDK rules to avoid race conditions
               sessionPromise.then(session => {
                 session.sendRealtimeInput({ media: pcmBlob });
               }).catch(() => {});
               
-              // Basic volume detection for visualizer
               let sum = 0;
               for(let i=0; i<inputData.length; i++) sum += inputData[i] * inputData[i];
               setVolume(Math.sqrt(sum / inputData.length));
@@ -147,7 +149,6 @@ const App: React.FC = () => {
               const audioCtx = outputAudioCtxRef.current;
               nextStartTimeRef.current = Math.max(nextStartTimeRef.current, audioCtx.currentTime);
               
-              // Custom decoding logic for raw PCM as required by SDK
               const audioBuffer = await decodeAudioData(decode(base64Audio), audioCtx, 24000, 1);
               const source = audioCtx.createBufferSource();
               source.buffer = audioBuffer;
@@ -164,9 +165,8 @@ const App: React.FC = () => {
             }
 
             if (message.serverContent?.inputTranscription) {
-              const text = message.serverContent.inputTranscription.text.toLowerCase();
+              const text = message.serverContent.inputTranscription.text;
               transcriptionRef.current.input += text;
-              if (text.includes("salin") || text.includes("hoy")) setIsAwake(true);
             }
             
             if (message.serverContent?.outputTranscription) {
@@ -194,26 +194,19 @@ const App: React.FC = () => {
               sourcesRef.current.forEach(s => { try { s.stop(); } catch(e) {} });
               sourcesRef.current.clear();
               setIsSpeaking(false);
+              nextStartTimeRef.current = 0;
             }
           },
           onerror: (e: any) => {
             console.error('Session error:', e);
-            
-            // Handle entity not found by resetting key selection state as per rules
-            if (e.message?.includes('Requested entity was not found') || e.message?.includes('not found')) {
-              if (typeof window !== 'undefined' && (window as any).aistudio) {
-                (window as any).aistudio.openSelectKey();
-              }
-            }
-
-            if (retryCountRef.current < MAX_RETRIES) {
-              retryCountRef.current++;
-              setTimeout(startSession, 2000);
+            if (e.message?.includes('not found') || e.message?.includes('404')) {
+              setErrorMessage('Model or API Key error. Try re-connecting.');
+              (window as any).aistudio?.openSelectKey();
             } else {
-              setErrorMessage(e.message || 'Connection failed. Please check your API key and region.');
-              setStatus(ConnectionStatus.ERROR);
-              stopSession();
+              setErrorMessage(e.message || 'Connection lost.');
             }
+            setStatus(ConnectionStatus.ERROR);
+            stopSession();
           },
           onclose: () => stopSession()
         }
@@ -222,7 +215,7 @@ const App: React.FC = () => {
     } catch (err: any) {
       console.error('Startup error:', err);
       setStatus(ConnectionStatus.ERROR);
-      setErrorMessage(err.message || 'Microphone access denied or connection error.');
+      setErrorMessage(err.message || 'Check microphone permissions.');
       isConnectingRef.current = false;
     }
   };
@@ -234,7 +227,7 @@ const App: React.FC = () => {
           <div className="w-10 h-10 bg-gradient-to-tr from-indigo-500 to-purple-600 rounded-xl flex items-center justify-center shadow-lg">
             <span className="text-white font-outfit font-bold text-xl">S</span>
           </div>
-          <h1 className="font-outfit font-bold text-lg text-gray-800">Salin</h1>
+          <h1 className="font-outfit font-bold text-lg text-gray-800 tracking-tight">Salin</h1>
         </div>
         <button 
           onClick={() => setIsPoliteMode(!isPoliteMode)} 
@@ -242,7 +235,7 @@ const App: React.FC = () => {
             isPoliteMode ? 'bg-indigo-600 border-indigo-600 text-white' : 'bg-gray-50 text-gray-400 border-gray-100'
           }`}
         >
-          Po/Opo
+          {isPoliteMode ? 'Polite On' : 'Casual'}
         </button>
       </header>
 
@@ -264,9 +257,8 @@ const App: React.FC = () => {
       </div>
 
       {status === ConnectionStatus.ERROR && (
-        <div className="px-6 py-3 bg-red-50 border-b border-red-100 animate-in slide-in-from-top">
-          <p className="text-[10px] font-bold text-red-700 uppercase mb-1">Service Error</p>
-          <p className="text-[11px] text-red-600 leading-tight font-medium">{errorMessage}</p>
+        <div className="px-6 py-3 bg-red-50 border-b border-red-100">
+          <p className="text-[11px] text-red-600 leading-tight font-medium">⚠️ {errorMessage}</p>
         </div>
       )}
 
@@ -279,31 +271,23 @@ const App: React.FC = () => {
 
       <footer className="p-6 bg-white/90 backdrop-blur-md border-t border-gray-100 sticky bottom-0 z-20">
         <button
-          onClick={status === ConnectionStatus.CONNECTED ? (isAwake ? stopSession : () => setIsAwake(true)) : startSession}
+          onClick={status === ConnectionStatus.CONNECTED ? stopSession : startSession}
           disabled={status === ConnectionStatus.CONNECTING}
           className={`w-full py-4 rounded-3xl font-outfit font-bold text-lg transition-all active:scale-95 shadow-2xl ${
             status === ConnectionStatus.CONNECTED 
-              ? (isAwake ? 'bg-white border-2 border-slate-200 text-slate-600' : 'bg-gradient-to-r from-indigo-600 to-indigo-700 text-white') 
+              ? 'bg-white border-2 border-slate-200 text-slate-600' 
               : status === ConnectionStatus.CONNECTING ? 'bg-gray-100 text-gray-400' : 'bg-gradient-to-r from-indigo-600 to-indigo-700 text-white'
           }`}
         >
-          {status === ConnectionStatus.CONNECTING ? 'Initializing...' : 
-           status === ConnectionStatus.CONNECTED ? (isAwake ? 'Stop Interpreter' : 'Awaken Salin') :
+          {status === ConnectionStatus.CONNECTING ? 'Connecting...' : 
+           status === ConnectionStatus.CONNECTED ? 'Stop Session' :
            'Start Interpreter'}
         </button>
         
         <div className="mt-4 flex flex-col items-center space-y-1">
           <p className="text-[10px] text-slate-400 font-bold uppercase tracking-widest text-center">
-            {isAwake ? "Salin is ready to translate" : "Tap button to begin voice session"}
+            {status === ConnectionStatus.CONNECTED ? "Speak now to translate" : "Tap to begin voice session"}
           </p>
-          {status === ConnectionStatus.ERROR && (
-            <button 
-              onClick={() => (window as any).aistudio?.openSelectKey()} 
-              className="text-[9px] text-indigo-500 font-bold uppercase underline mt-2"
-            >
-              Reconfigure API Key
-            </button>
-          )}
         </div>
       </footer>
     </div>
