@@ -4,6 +4,7 @@ export interface TranscriptionEntry {
   speaker: 'user' | 'model';
   text: string;
   timestamp: Date;
+  mode: AppMode;
 }
 
 export enum ConnectionStatus {
