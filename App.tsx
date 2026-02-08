@@ -6,8 +6,6 @@ import { decode, decodeAudioData, createBlob } from './services/audio-helpers';
 import VoiceVisualizer from './components/VoiceVisualizer';
 import TranscriptionList from './components/TranscriptionList';
 
-const MAX_RETRIES = 1;
-
 const App: React.FC = () => {
   const [status, setStatus] = useState<ConnectionStatus>(ConnectionStatus.IDLE);
   const [mode, setMode] = useState<AppMode>(AppMode.TRANSLATE);
@@ -29,7 +27,6 @@ const App: React.FC = () => {
   const nextStartTimeRef = useRef<number>(0);
   const sourcesRef = useRef<Set<AudioBufferSourceNode>>(new Set());
   const transcriptionRef = useRef<{ input: string, output: string }>({ input: '', output: '' });
-  const retryCountRef = useRef(0);
 
   useEffect(() => {
     const handleOnline = () => setIsOnline(true);
@@ -67,7 +64,7 @@ const App: React.FC = () => {
 
   const startSession = async () => {
     if (!isOnline) {
-      setErrorMessage('Offline: Check your internet connection.');
+      setErrorMessage('Internet connection required.');
       setStatus(ConnectionStatus.ERROR);
       return;
     }
@@ -78,19 +75,21 @@ const App: React.FC = () => {
     setStatus(ConnectionStatus.CONNECTING);
 
     try {
-      // Logic for AI Studio preview environment
+      // Key selection logic for preview environments
       if (typeof window !== 'undefined' && (window as any).aistudio) {
         const hasKey = await (window as any).aistudio.hasSelectedApiKey();
         if (!hasKey) {
-          await (window as any).aistudio.openSelectKey();
+          (window as any).aistudio.openSelectKey();
+          // Per rules: assume success and proceed
         }
       }
 
       const apiKey = process.env.API_KEY || '';
       if (!apiKey) {
-        throw new Error("API Key is not configured. Please check your environment variables.");
+        throw new Error("API Key is missing. Check your settings.");
       }
 
+      // Initialize AI instance exactly before use
       const ai = new GoogleGenAI({ apiKey });
       
       const AudioCtx = (window.AudioContext || (window as any).webkitAudioContext);
@@ -103,14 +102,16 @@ const App: React.FC = () => {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
 
       const modeInstruction = mode === AppMode.TRANSLATE 
-        ? "PURE TRANSLATION MODE: You are an expert speech-to-speech interpreter. If you hear English, speak Filipino. If you hear Filipino, speak English. Output ONLY the translation. Never add your own commentary or chatter. Be very fast."
-        : "CHAT MODE: You are Salin, a friendly English-Filipino assistant who uses natural 'Taglish'.";
+        ? "You are a specialized bidirectional English-Filipino speech-to-speech interpreter. If you hear English, translate to Filipino. If you hear Filipino, translate to English. ONLY speak the translation. No commentary."
+        : "You are Salin, a helpful English-Filipino assistant. Use natural Taglish.";
+
+      const politePrompt = isPoliteMode ? 'Always use "po" and "opo" in Filipino.' : 'Use casual and natural phrasing.';
 
       const sessionPromise = ai.live.connect({
         model: 'gemini-2.5-flash-native-audio-preview-12-2025',
         config: {
           responseModalities: [Modality.AUDIO],
-          systemInstruction: `${modeInstruction} ${isPoliteMode ? 'Use po and opo consistently.' : 'Be casual.'} Wake word is 'Salin'.`,
+          systemInstruction: `${modeInstruction} ${politePrompt} Speak naturally and quickly.`,
           speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Kore' } } },
           outputAudioTranscription: {},
           inputAudioTranscription: {},
@@ -118,9 +119,8 @@ const App: React.FC = () => {
         callbacks: {
           onopen: () => {
             setStatus(ConnectionStatus.CONNECTED);
-            setIsAwake(true); // Auto-wake on start for better mobile experience
+            setIsAwake(true);
             isConnectingRef.current = false;
-            retryCountRef.current = 0;
             
             const source = inputAudioCtxRef.current!.createMediaStreamSource(stream);
             const scriptProcessor = inputAudioCtxRef.current!.createScriptProcessor(4096, 1, 1);
@@ -133,6 +133,10 @@ const App: React.FC = () => {
               sessionPromise.then(session => {
                 session.sendRealtimeInput({ media: pcmBlob });
               }).catch(() => {});
+              
+              // Prevent feedback loop by zeroing out the output buffer
+              const outputData = e.outputBuffer.getChannelData(0);
+              outputData.fill(0);
               
               let sum = 0;
               for(let i=0; i<inputData.length; i++) sum += inputData[i] * inputData[i];
@@ -161,35 +165,30 @@ const App: React.FC = () => {
               
               source.start(nextStartTimeRef.current);
               nextStartTimeRef.current += audioBuffer.duration;
+              // Fix: Access current property of sourcesRef to add the source to the Set
               sourcesRef.current.add(source);
             }
 
             if (message.serverContent?.inputTranscription) {
-              const text = message.serverContent.inputTranscription.text;
-              transcriptionRef.current.input += text;
+              transcriptionRef.current.input += message.serverContent.inputTranscription.text;
             }
-            
             if (message.serverContent?.outputTranscription) {
               transcriptionRef.current.output += message.serverContent.outputTranscription.text;
             }
-            
             if (message.serverContent?.turnComplete) {
               const uText = transcriptionRef.current.input.trim();
               const mText = transcriptionRef.current.output.trim();
-              
-              if (uText && isAwake) {
+              if (uText) {
                 const entry = (s: 'user'|'model', t: string): TranscriptionEntry => ({
                   id: Math.random().toString(36).substr(2, 9),
                   speaker: s, text: t, timestamp: new Date(), mode
                 });
-                
                 const setter = mode === AppMode.TRANSLATE ? setTranslateHistory : setChatHistory;
                 setter(prev => [...prev, entry('user', uText)]);
                 if (mText) setter(prev => [...prev, entry('model', mText)]);
               }
               transcriptionRef.current = { input: '', output: '' };
             }
-
             if (message.serverContent?.interrupted) {
               sourcesRef.current.forEach(s => { try { s.stop(); } catch(e) {} });
               sourcesRef.current.clear();
@@ -199,11 +198,11 @@ const App: React.FC = () => {
           },
           onerror: (e: any) => {
             console.error('Session error:', e);
-            if (e.message?.includes('not found') || e.message?.includes('404')) {
-              setErrorMessage('Model or API Key error. Try re-connecting.');
+            if (e.message?.includes('not found')) {
+              setErrorMessage('Model access error. Re-selecting key might help.');
               (window as any).aistudio?.openSelectKey();
             } else {
-              setErrorMessage(e.message || 'Connection lost.');
+              setErrorMessage(e.message || 'Connection failed.');
             }
             setStatus(ConnectionStatus.ERROR);
             stopSession();
@@ -220,36 +219,53 @@ const App: React.FC = () => {
     }
   };
 
+  const clearHistory = () => {
+    if (mode === AppMode.TRANSLATE) setTranslateHistory([]);
+    else setChatHistory([]);
+  };
+
   return (
-    <div className="min-h-screen max-w-md mx-auto bg-gray-50 flex flex-col shadow-2xl overflow-hidden relative">
-      <header className="bg-white/80 backdrop-blur-md px-6 py-4 flex items-center justify-between border-b border-gray-100 sticky top-0 z-20">
+    <div className="min-h-screen max-w-md mx-auto bg-gray-50 flex flex-col shadow-2xl overflow-hidden relative border-x border-gray-100">
+      <header className="bg-white/90 backdrop-blur-md px-6 py-4 flex items-center justify-between border-b border-gray-100 sticky top-0 z-20">
         <div className="flex items-center space-x-3">
-          <div className="w-10 h-10 bg-gradient-to-tr from-indigo-500 to-purple-600 rounded-xl flex items-center justify-center shadow-lg">
+          <div className="w-10 h-10 bg-gradient-to-tr from-indigo-600 to-indigo-800 rounded-xl flex items-center justify-center shadow-lg">
             <span className="text-white font-outfit font-bold text-xl">S</span>
           </div>
-          <h1 className="font-outfit font-bold text-lg text-gray-800 tracking-tight">Salin</h1>
+          <div>
+            <h1 className="font-outfit font-bold text-lg text-gray-800 leading-none">Salin</h1>
+            <p className="text-[9px] font-bold text-indigo-500 uppercase tracking-widest mt-1">Live AI Interpreter</p>
+          </div>
         </div>
-        <button 
-          onClick={() => setIsPoliteMode(!isPoliteMode)} 
-          className={`px-3 py-1.5 rounded-2xl border text-[10px] font-black uppercase transition-all shadow-sm ${
-            isPoliteMode ? 'bg-indigo-600 border-indigo-600 text-white' : 'bg-gray-50 text-gray-400 border-gray-100'
-          }`}
-        >
-          {isPoliteMode ? 'Polite On' : 'Casual'}
-        </button>
+        <div className="flex items-center space-x-2">
+          <button 
+            onClick={clearHistory}
+            className="p-2 text-gray-400 hover:text-red-500 transition-colors"
+            title="Clear History"
+          >
+            <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 6h18M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2M10 11v6M14 11v6"/></svg>
+          </button>
+          <button 
+            onClick={() => setIsPoliteMode(!isPoliteMode)} 
+            className={`px-3 py-1.5 rounded-2xl border text-[10px] font-black uppercase transition-all shadow-sm ${
+              isPoliteMode ? 'bg-indigo-600 border-indigo-600 text-white' : 'bg-gray-50 text-gray-400 border-gray-100'
+            }`}
+          >
+            {isPoliteMode ? 'Polite' : 'Casual'}
+          </button>
+        </div>
       </header>
 
-      <div className="px-6 py-2 bg-white flex justify-center border-b border-gray-100">
-        <div className="flex bg-gray-100 p-1 rounded-2xl w-full max-w-[280px]">
+      <div className="px-6 py-3 bg-white flex justify-center border-b border-gray-100">
+        <div className="flex bg-gray-100 p-1 rounded-2xl w-full">
           <button 
             onClick={() => { setMode(AppMode.TRANSLATE); stopSession(); }} 
-            className={`flex-1 py-2 px-4 rounded-xl text-[10px] font-bold uppercase transition-all ${mode === AppMode.TRANSLATE ? 'bg-white text-indigo-600 shadow-sm' : 'text-gray-400'}`}
+            className={`flex-1 py-2 px-4 rounded-xl text-[10px] font-bold uppercase tracking-widest transition-all ${mode === AppMode.TRANSLATE ? 'bg-white text-indigo-600 shadow-sm' : 'text-gray-400'}`}
           >
             Translate
           </button>
           <button 
             onClick={() => { setMode(AppMode.CHAT); stopSession(); }} 
-            className={`flex-1 py-2 px-4 rounded-xl text-[10px] font-bold uppercase transition-all ${mode === AppMode.CHAT ? 'bg-white text-emerald-600 shadow-sm' : 'text-gray-400'}`}
+            className={`flex-1 py-2 px-4 rounded-xl text-[10px] font-bold uppercase tracking-widest transition-all ${mode === AppMode.CHAT ? 'bg-white text-emerald-600 shadow-sm' : 'text-gray-400'}`}
           >
             Chat
           </button>
@@ -257,38 +273,36 @@ const App: React.FC = () => {
       </div>
 
       {status === ConnectionStatus.ERROR && (
-        <div className="px-6 py-3 bg-red-50 border-b border-red-100">
-          <p className="text-[11px] text-red-600 leading-tight font-medium">⚠️ {errorMessage}</p>
+        <div className="px-6 py-3 bg-red-50 border-b border-red-100 animate-in slide-in-from-top">
+          <p className="text-[11px] text-red-700 leading-tight font-bold">⚠️ ERROR: {errorMessage}</p>
         </div>
       )}
 
-      <main className="flex-1 flex flex-col z-10 overflow-hidden bg-white/30">
-        <div className="bg-white/50 backdrop-blur-sm rounded-b-[48px] shadow-xl shadow-gray-100/50 border-b border-white">
+      <main className="flex-1 flex flex-col z-10 overflow-hidden bg-white/40">
+        <div className="bg-white/80 backdrop-blur-md rounded-b-[40px] shadow-sm border-b border-white">
           <VoiceVisualizer status={status} isActive={isSpeaking} isAwake={isAwake} volume={volume} mood="neutral" />
         </div>
         <TranscriptionList entries={mode === AppMode.TRANSLATE ? translateHistory : chatHistory} />
       </main>
 
-      <footer className="p-6 bg-white/90 backdrop-blur-md border-t border-gray-100 sticky bottom-0 z-20">
+      <footer className="p-6 bg-white border-t border-gray-100 sticky bottom-0 z-20">
         <button
           onClick={status === ConnectionStatus.CONNECTED ? stopSession : startSession}
           disabled={status === ConnectionStatus.CONNECTING}
-          className={`w-full py-4 rounded-3xl font-outfit font-bold text-lg transition-all active:scale-95 shadow-2xl ${
+          className={`w-full py-4 rounded-3xl font-outfit font-bold text-lg transition-all active:scale-95 shadow-xl ${
             status === ConnectionStatus.CONNECTED 
-              ? 'bg-white border-2 border-slate-200 text-slate-600' 
-              : status === ConnectionStatus.CONNECTING ? 'bg-gray-100 text-gray-400' : 'bg-gradient-to-r from-indigo-600 to-indigo-700 text-white'
+              ? 'bg-slate-100 text-slate-600 border border-slate-200' 
+              : status === ConnectionStatus.CONNECTING ? 'bg-gray-100 text-gray-400 cursor-not-allowed' : 'bg-gradient-to-r from-indigo-600 to-indigo-800 text-white'
           }`}
         >
           {status === ConnectionStatus.CONNECTING ? 'Connecting...' : 
-           status === ConnectionStatus.CONNECTED ? 'Stop Session' :
-           'Start Interpreter'}
+           status === ConnectionStatus.CONNECTED ? 'Stop Interpreter' :
+           'Start Translation'}
         </button>
         
-        <div className="mt-4 flex flex-col items-center space-y-1">
-          <p className="text-[10px] text-slate-400 font-bold uppercase tracking-widest text-center">
-            {status === ConnectionStatus.CONNECTED ? "Speak now to translate" : "Tap to begin voice session"}
-          </p>
-        </div>
+        <p className="mt-4 text-[10px] text-slate-400 font-bold uppercase tracking-[0.2em] text-center">
+          {status === ConnectionStatus.CONNECTED ? "Listening for speech..." : "Tap to activate voice mode"}
+        </p>
       </footer>
     </div>
   );
