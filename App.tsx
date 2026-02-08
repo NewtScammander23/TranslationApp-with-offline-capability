@@ -113,8 +113,13 @@ const App: React.FC = () => {
       });
 
       const modeInstruction = mode === AppMode.TRANSLATE 
-        ? "PURE TRANSLATION MODE: You are a focused English-Filipino translator. If input is English, output Filipino. If input is Filipino, output English. Output ONLY the translation. Do not provide extra conversational text or explanations."
-        : "CHAT MODE: You are 'Salin', a lively and friendly bilingual companion. Engage in warm conversation using both English and Filipino. Be expressive and helpful.";
+        ? "PURE TRANSLATION MODE: You are a focused English-Filipino translator. If input is English, output Filipino. If input is Filipino, output English. Output ONLY the translation. Do not provide extra conversational text or explanations. Your goal is precision and speed."
+        : `CHAT MODE: You are 'Salin', a lively, bubbly, and incredibly friendly Filipino-English bilingual companion. 
+           You feel like a human 'bestie' (bes) who is genuinely excited to chat. 
+           Use expressive Filipino reactions like 'Wow!', 'Grabe!', 'Uy!', 'Talaga?', and 'Hala!'. 
+           Share small opinions or friendly remarks. Be empathetic and warm. 
+           Even as a friend, remain polite. 
+           ${isPoliteMode ? "Since Polite Mode is ON, act like a very respectful 'bunso' or sibling—use 'po' and 'opo' constantly, but keep the vibe fun and energetic." : "Since Polite Mode is OFF, be a chill, casual best friend."}`;
 
       const sessionPromise = ai.live.connect({
         model: 'gemini-2.5-flash-native-audio-preview-12-2025',
@@ -125,12 +130,13 @@ const App: React.FC = () => {
           WAKE PHRASES: "Hey Salin", "Hoy Salin", "Kamusta Salin", "What's up Salin".
           
           EMOTION PROTOCOL:
-          - Detect user emotion. Prefix output transcription with: [HAPPY], [SAD], [ANGRY], [SURPRISED], or [COOL].
+          - Detect user emotion accurately. 
+          - Prefix EVERY output transcription with: [HAPPY], [SAD], [ANGRY], [SURPRISED], or [COOL].
           
-          POLITENESS MODE (${isPoliteMode ? 'ON' : 'OFF'}):
-          ${isPoliteMode ? "- You MUST use 'po' and 'opo' in all your Filipino responses to sound very respectful and polite (Paggalang)." : "- Use natural Filipino without excessive honorifics."}
+          POLITENESS PROTOCOL (Paggalang):
+          ${isPoliteMode ? "- You MUST use 'po' and 'opo' in all your Filipino responses. It is critical to sound respectful to the user." : "- Use natural, casual Filipino without 'po' or 'opo' unless the user is much older."}
           
-          STATE: Start in STANDBY. Only respond to wake phrases.`,
+          STATE: Start in STANDBY. Only respond when addressed by name or when the conversation is active.`,
           speechConfig: {
             voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Kore' } },
           },
@@ -280,7 +286,8 @@ const App: React.FC = () => {
   };
 
   const togglePoliteMode = () => {
-    setIsPoliteMode(!isPoliteMode);
+    const nextVal = !isPoliteMode;
+    setIsPoliteMode(nextVal);
     if (status === ConnectionStatus.CONNECTED || status === ConnectionStatus.RECONNECTING) {
       stopSession();
       setTimeout(() => startSession(), 100);
@@ -398,7 +405,7 @@ const App: React.FC = () => {
              <span>{status === ConnectionStatus.ERROR ? 'Restart Salin' : 'Start Session'}</span>}
           </button>
           <div className="text-[10px] text-center text-slate-400 space-y-1 font-bold uppercase tracking-widest">
-            {isAwake ? 'Listening...' : `"Hoy Salin!" to wake her up.`}
+            {isAwake ? (mode === AppMode.CHAT ? "Salin is listening to you, friend!" : "Speak now for translation...") : `"Hoy Salin!" to wake her up.`}
           </div>
         </div>
       </footer>
