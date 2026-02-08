@@ -10,6 +10,7 @@ const App: React.FC = () => {
   const [status, setStatus] = useState<ConnectionStatus>(ConnectionStatus.IDLE);
   const [mode, setMode] = useState<AppMode>(AppMode.TRANSLATE);
   const [errorMessage, setErrorMessage] = useState<string>('');
+  const [micPermissionDenied, setMicPermissionDenied] = useState(false);
   
   const [translateHistory, setTranslateHistory] = useState<TranscriptionEntry[]>([]);
   const [chatHistory, setChatHistory] = useState<TranscriptionEntry[]>([]);
@@ -69,27 +70,45 @@ const App: React.FC = () => {
       return;
     }
 
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      setErrorMessage('Your browser does not support microphone access or you are not in a secure (HTTPS) environment.');
+      setStatus(ConnectionStatus.ERROR);
+      return;
+    }
+
     if (isConnectingRef.current) return;
     isConnectingRef.current = true;
     setErrorMessage('');
+    setMicPermissionDenied(false);
     setStatus(ConnectionStatus.CONNECTING);
 
+    let stream: MediaStream;
     try {
-      // Key selection logic for preview environments
-      if (typeof window !== 'undefined' && (window as any).aistudio) {
-        const hasKey = await (window as any).aistudio.hasSelectedApiKey();
-        if (!hasKey) {
-          (window as any).aistudio.openSelectKey();
-          // Per rules: assume success and proceed
-        }
+      stream = await navigator.mediaDevices.getUserMedia({ 
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true
+        } 
+      });
+    } catch (err: any) {
+      isConnectingRef.current = false;
+      setStatus(ConnectionStatus.ERROR);
+      if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
+        setMicPermissionDenied(true);
+        setErrorMessage('Microphone access was denied. Please allow microphone permissions in your browser settings.');
+      } else if (err.name === 'NotFoundError' || err.name === 'DevicesNotFoundError') {
+        setErrorMessage('No microphone was found on your device.');
+      } else {
+        setErrorMessage(`Microphone error: ${err.message}`);
       }
+      return;
+    }
 
+    try {
       const apiKey = process.env.API_KEY || '';
-      if (!apiKey) {
-        throw new Error("API Key is missing. Check your settings.");
-      }
+      if (!apiKey) throw new Error("API Key is missing.");
 
-      // Initialize AI instance exactly before use
       const ai = new GoogleGenAI({ apiKey });
       
       const AudioCtx = (window.AudioContext || (window as any).webkitAudioContext);
@@ -98,8 +117,6 @@ const App: React.FC = () => {
       
       await inputAudioCtxRef.current.resume();
       await outputAudioCtxRef.current.resume();
-
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
 
       const modeInstruction = mode === AppMode.TRANSLATE 
         ? "You are a specialized bidirectional English-Filipino speech-to-speech interpreter. If you hear English, translate to Filipino. If you hear Filipino, translate to English. ONLY speak the translation. No commentary."
@@ -134,7 +151,6 @@ const App: React.FC = () => {
                 session.sendRealtimeInput({ media: pcmBlob });
               }).catch(() => {});
               
-              // Prevent feedback loop by zeroing out the output buffer
               const outputData = e.outputBuffer.getChannelData(0);
               outputData.fill(0);
               
@@ -165,7 +181,6 @@ const App: React.FC = () => {
               
               source.start(nextStartTimeRef.current);
               nextStartTimeRef.current += audioBuffer.duration;
-              // Fix: Access current property of sourcesRef to add the source to the Set
               sourcesRef.current.add(source);
             }
 
@@ -198,12 +213,7 @@ const App: React.FC = () => {
           },
           onerror: (e: any) => {
             console.error('Session error:', e);
-            if (e.message?.includes('not found')) {
-              setErrorMessage('Model access error. Re-selecting key might help.');
-              (window as any).aistudio?.openSelectKey();
-            } else {
-              setErrorMessage(e.message || 'Connection failed.');
-            }
+            setErrorMessage(e.message || 'The session encountered an error.');
             setStatus(ConnectionStatus.ERROR);
             stopSession();
           },
@@ -214,8 +224,9 @@ const App: React.FC = () => {
     } catch (err: any) {
       console.error('Startup error:', err);
       setStatus(ConnectionStatus.ERROR);
-      setErrorMessage(err.message || 'Check microphone permissions.');
+      setErrorMessage(err.message || 'Failed to initialize AI session.');
       isConnectingRef.current = false;
+      if (stream) stream.getTracks().forEach(track => track.stop());
     }
   };
 
@@ -273,8 +284,24 @@ const App: React.FC = () => {
       </div>
 
       {status === ConnectionStatus.ERROR && (
-        <div className="px-6 py-3 bg-red-50 border-b border-red-100 animate-in slide-in-from-top">
-          <p className="text-[11px] text-red-700 leading-tight font-bold">⚠️ ERROR: {errorMessage}</p>
+        <div className="px-6 py-4 bg-red-50 border-b border-red-100 animate-in slide-in-from-top">
+          <div className="flex items-start space-x-3">
+            <div className="mt-0.5 text-red-600">
+              <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+            </div>
+            <div>
+              <p className="text-[11px] text-red-700 leading-tight font-bold uppercase mb-1">Error Occurred</p>
+              <p className="text-[12px] text-red-600 leading-snug">{errorMessage}</p>
+              {micPermissionDenied && (
+                <button 
+                  onClick={() => window.location.reload()}
+                  className="mt-2 text-[10px] font-black text-red-700 uppercase underline tracking-wider"
+                >
+                  Refresh and Try Again
+                </button>
+              )}
+            </div>
+          </div>
         </div>
       )}
 
@@ -301,7 +328,7 @@ const App: React.FC = () => {
         </button>
         
         <p className="mt-4 text-[10px] text-slate-400 font-bold uppercase tracking-[0.2em] text-center">
-          {status === ConnectionStatus.CONNECTED ? "Listening for speech..." : "Tap to activate voice mode"}
+          {status === ConnectionStatus.CONNECTED ? "Salin is Listening..." : "Tap to activate microphone"}
         </p>
       </footer>
     </div>
