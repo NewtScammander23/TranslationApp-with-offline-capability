@@ -13,7 +13,6 @@ const App: React.FC = () => {
   const [status, setStatus] = useState<ConnectionStatus>(ConnectionStatus.IDLE);
   const [mode, setMode] = useState<AppMode>(AppMode.TRANSLATE);
   
-  // Separated Histories
   const [translateHistory, setTranslateHistory] = useState<TranscriptionEntry[]>([]);
   const [chatHistory, setChatHistory] = useState<TranscriptionEntry[]>([]);
   
@@ -25,6 +24,7 @@ const App: React.FC = () => {
   const [currentMood, setCurrentMood] = useState<'neutral' | 'happy' | 'sad' | 'angry' | 'surprised' | 'cool'>('neutral');
 
   const sessionRef = useRef<any>(null);
+  const isConnectingRef = useRef(false);
   const inputAudioCtxRef = useRef<AudioContext | null>(null);
   const outputAudioCtxRef = useRef<AudioContext | null>(null);
   const nextStartTimeRef = useRef<number>(0);
@@ -49,6 +49,7 @@ const App: React.FC = () => {
   }, []);
 
   const stopSession = useCallback(() => {
+    // Clear any pending retries immediately
     if (retryTimeoutRef.current) {
       window.clearTimeout(retryTimeoutRef.current);
       retryTimeoutRef.current = null;
@@ -63,6 +64,7 @@ const App: React.FC = () => {
       sessionRef.current = null;
     }
 
+    // Stop all active audio sources
     sourcesRef.current.forEach(s => {
       try { s.stop(); } catch(e) {}
     });
@@ -90,7 +92,7 @@ const App: React.FC = () => {
     setIsAwake(false);
     setCurrentMood('neutral');
     nextStartTimeRef.current = 0;
-    retryCountRef.current = 0;
+    isConnectingRef.current = false;
   }, []);
 
   const startSession = async () => {
@@ -99,6 +101,10 @@ const App: React.FC = () => {
       return;
     }
 
+    // Concurrency Lock: Prevent multiple connection attempts at once
+    if (isConnectingRef.current) return;
+    isConnectingRef.current = true;
+
     try {
       if (retryCountRef.current === 0) {
         setStatus(ConnectionStatus.CONNECTING);
@@ -106,9 +112,14 @@ const App: React.FC = () => {
         setStatus(ConnectionStatus.RECONNECTING);
       }
       
-      setIsAwake(false);
-      const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+      const apiKey = process.env.API_KEY;
+      if (!apiKey) {
+        throw new Error("API Key is missing. Please check environment variables.");
+      }
+
+      const ai = new GoogleGenAI({ apiKey });
       
+      // Initialize fresh Audio Contexts
       inputAudioCtxRef.current = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 16000 });
       outputAudioCtxRef.current = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 });
       
@@ -117,9 +128,8 @@ const App: React.FC = () => {
       });
 
       const modeInstruction = mode === AppMode.TRANSLATE 
-        ? "PURE TRANSLATION MODE: You are a professional English-Filipino translator. Output ONLY the translation. No conversational filler. Precision is your priority."
-        : `CHAT MODE: You are 'Salin', a bubbly Filipino-English bestie. Be human-like, expressive, and lively! Use Filipino slang and reactions. 
-           ${isPoliteMode ? "Act like a respectful sibling, use 'po' and 'opo' always but stay energetic." : "Be a casual friend."}`;
+        ? "PURE TRANSLATION MODE: You are a professional English-Filipino translator. Precision is priority. Output ONLY the translation without any conversational filler."
+        : `CHAT MODE: You are 'Salin', a bubbly Filipino-English bestie. Be lively, human-like, and use Filipino slang! ${isPoliteMode ? "Be a respectful sibling (use po/opo)." : "Be a casual friend."}`;
 
       const sessionPromise = ai.live.connect({
         model: 'gemini-2.5-flash-native-audio-preview-12-2025',
@@ -127,8 +137,8 @@ const App: React.FC = () => {
           responseModalities: [Modality.AUDIO],
           systemInstruction: `You are 'Salin'. ${modeInstruction}
           WAKE PHRASES: "Hey Salin", "Hoy Salin", "Kamusta Salin", "What's up Salin".
-          Prefix output transcription with moods: [HAPPY], [SAD], [ANGRY], [SURPRISED], or [COOL].
-          ${isPoliteMode ? "MUST use 'po/opo' in Filipino." : "Natural casual Filipino."}`,
+          Prefix output with: [HAPPY], [SAD], [ANGRY], [SURPRISED], or [COOL].
+          ${isPoliteMode ? "Always use 'po' and 'opo' in Filipino." : "Casual Filipino style."}`,
           speechConfig: {
             voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Kore' } },
           },
@@ -138,7 +148,9 @@ const App: React.FC = () => {
         callbacks: {
           onopen: () => {
             setStatus(ConnectionStatus.CONNECTED);
+            isConnectingRef.current = false;
             retryCountRef.current = 0;
+            
             if (!inputAudioCtxRef.current) return;
             const source = inputAudioCtxRef.current.createMediaStreamSource(stream);
             const scriptProcessor = inputAudioCtxRef.current.createScriptProcessor(4096, 1, 1);
@@ -204,16 +216,16 @@ const App: React.FC = () => {
               let modelText = transcriptionRef.current.output.trim();
               modelText = modelText.replace(/\[(HAPPY|SAD|ANGRY|SURPRISED|COOL|NEUTRAL)\]/gi, '').trim();
 
-              const currentMode = mode; // Capture for closure safety
+              const currentActiveMode = mode;
               const addEntry = (speaker: 'user' | 'model', text: string) => {
                 const entry: TranscriptionEntry = {
                   id: Math.random().toString(36).substr(2, 9),
                   speaker,
                   text,
                   timestamp: new Date(),
-                  mode: currentMode
+                  mode: currentActiveMode
                 };
-                if (currentMode === AppMode.TRANSLATE) {
+                if (currentActiveMode === AppMode.TRANSLATE) {
                   setTranslateHistory(prev => [...prev, entry]);
                 } else {
                   setChatHistory(prev => [...prev, entry]);
@@ -235,6 +247,8 @@ const App: React.FC = () => {
           },
           onerror: (e) => {
             console.error('Salin Session Error:', e);
+            isConnectingRef.current = false;
+            
             if (retryCountRef.current < MAX_RETRIES) {
               retryCountRef.current++;
               setStatus(ConnectionStatus.RECONNECTING);
@@ -257,6 +271,7 @@ const App: React.FC = () => {
       sessionRef.current = await sessionPromise;
     } catch (err) {
       console.error('Failed to initiate Salin:', err);
+      isConnectingRef.current = false;
       setStatus(ConnectionStatus.ERROR);
     }
   };
@@ -264,7 +279,7 @@ const App: React.FC = () => {
   const handleToggleSession = async () => {
     if (status === ConnectionStatus.IDLE || status === ConnectionStatus.ERROR) {
       retryCountRef.current = 0;
-      startSession();
+      await startSession();
     } else if (status === ConnectionStatus.CONNECTED || status === ConnectionStatus.RECONNECTING) {
       if (!isAwake) setIsAwake(true);
       else stopSession();
@@ -275,17 +290,16 @@ const App: React.FC = () => {
     setIsPoliteMode(!isPoliteMode);
     if (status === ConnectionStatus.CONNECTED || status === ConnectionStatus.RECONNECTING) {
       stopSession();
-      setTimeout(() => startSession(), 100);
+      setTimeout(() => startSession(), 300); // Slightly longer delay for cleanup
     }
   };
 
   const switchMode = (newMode: AppMode) => {
     if (newMode === mode) return;
     setMode(newMode);
-    // When switching modes, we restart session to update system instructions
     if (status === ConnectionStatus.CONNECTED || status === ConnectionStatus.RECONNECTING) {
       stopSession();
-      setTimeout(() => startSession(), 100);
+      setTimeout(() => startSession(), 300);
     }
   };
 
@@ -316,7 +330,6 @@ const App: React.FC = () => {
         </button>
       </header>
 
-      {/* Mode Switcher */}
       <div className="px-6 py-2 bg-white flex items-center justify-center border-b border-gray-100">
         <div className="flex bg-gray-100 p-1 rounded-2xl w-full max-w-[280px]">
           <button 
@@ -346,8 +359,8 @@ const App: React.FC = () => {
           status === ConnectionStatus.ERROR ? 'bg-red-50 text-red-700 border-red-100' : 'bg-amber-50 text-amber-700 border-amber-100'
         }`}>
            {status === ConnectionStatus.RECONNECTING ? `⚠️ Reconnecting...` : 
-            status === ConnectionStatus.ERROR ? '⚠️ Error. Restarting...' : 
-            '⚠️ Check Internet Connection...'}
+            status === ConnectionStatus.ERROR ? '⚠️ Service error. Try restarting.' : 
+            '⚠️ Checking connection...'}
         </div>
       )}
 
@@ -365,12 +378,11 @@ const App: React.FC = () => {
         {isPoliteMode && isAwake && (
           <div className="px-6 mt-2 mb-1">
              <div className="bg-indigo-50/50 border border-indigo-100 py-1.5 px-3 rounded-full flex items-center justify-center space-x-2 w-max mx-auto">
-                <span className="text-[9px] font-bold text-indigo-600 uppercase tracking-widest">Polite Mode (Po/Opo)</span>
+                <span className="text-[9px] font-bold text-indigo-600 uppercase tracking-widest">Polite Mode ON</span>
              </div>
           </div>
         )}
 
-        {/* Display history based on current mode */}
         <TranscriptionList entries={mode === AppMode.TRANSLATE ? translateHistory : chatHistory} />
       </main>
 
@@ -389,10 +401,10 @@ const App: React.FC = () => {
             {status === ConnectionStatus.CONNECTING ? <span>Connecting...</span> : 
              status === ConnectionStatus.RECONNECTING ? <span>Retrying...</span> :
              status === ConnectionStatus.CONNECTED ? (isAwake ? <span>End Session</span> : <span>Wake Up</span>) :
-             <span>{status === ConnectionStatus.ERROR ? 'Restart Salin' : 'Start Session'}</span>}
+             <span>{status === ConnectionStatus.ERROR ? 'Try Again' : 'Start Session'}</span>}
           </button>
           <div className="text-[10px] text-center text-slate-400 space-y-1 font-bold uppercase tracking-widest">
-            {isAwake ? (mode === AppMode.CHAT ? "Salin is listening to you, friend!" : "Speak now for translation...") : `"Hoy Salin!" to wake her up.`}
+            {isAwake ? (mode === AppMode.CHAT ? "Salin is listening!" : "Speak for translation...") : `"Hoy Salin!" to wake her up.`}
           </div>
         </div>
       </footer>
