@@ -1,0 +1,70 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Salin - Expressive English-Filipino Voice Translator</title>
+    <link rel="manifest" href="metadata.json">
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&family=Outfit:wght@400;700&display=swap" rel="stylesheet">
+    <style>
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #f8fafc;
+            overflow-x: hidden;
+            -webkit-tap-highlight-color: transparent;
+        }
+        .font-outfit {
+            font-family: 'Outfit', sans-serif;
+        }
+        @keyframes pulse-slow {
+            0%, 100% { transform: scale(1); opacity: 0.8; }
+            50% { transform: scale(1.1); opacity: 1; }
+        }
+        .animate-pulse-slow {
+            animation: pulse-slow 3s infinite ease-in-out;
+        }
+        /* Custom scrollbar */
+        ::-webkit-scrollbar {
+          width: 4px;
+        }
+        ::-webkit-scrollbar-track {
+          background: transparent;
+        }
+        ::-webkit-scrollbar-thumb {
+          background: #e2e8f0;
+          border-radius: 10px;
+        }
+    </style>
+<script type="importmap">
+{
+  "imports": {
+    "react/": "https://esm.sh/react@^19.2.4/",
+    "react": "https://esm.sh/react@^19.2.4",
+    "react-dom/": "https://esm.sh/react-dom@^19.2.4/",
+    "@google/genai": "https://esm.sh/@google/genai@^1.40.0"
+  }
+}
+</script>
+<script>
+  // Simplified Service Worker registration to avoid URL construction errors in sandboxed iframes
+  if ('serviceWorker' in navigator) {
+    window.addEventListener('load', () => {
+      // Use a simple relative path which is standard for SW registration
+      navigator.serviceWorker.register('sw.js')
+        .then(reg => console.log('Salin SW Active:', reg.scope))
+        .catch(err => {
+          // Silent fail for cross-origin iframes where SW is blocked by policy or origin mismatch
+          console.warn('Salin Offline Mode unavailable:', err.message);
+        });
+    });
+  }
+</script>
+<link rel="stylesheet" href="/index.css">
+</head>
+<body class="bg-gray-50 text-gray-900">
+    <div id="root"></div>
+<script type="module" src="/index.tsx"></script>
+</body>
+</html>

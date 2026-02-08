@@ -1,0 +1,12 @@
+{
+  "name": "Salin: Voice Translator",
+  "short_name": "Salin",
+  "description": "A lively, interactive English-Filipino speech-to-speech translator powered by Gemini Live. Featuring voice activation and real-time translation.",
+  "requestFramePermissions": [
+    "microphone"
+  ],
+  "start_url": "./index.html",
+  "display": "standalone",
+  "background_color": "#f8fafc",
+  "theme_color": "#4f46e5"
+}
