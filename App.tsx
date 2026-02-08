@@ -6,12 +6,13 @@ import { decode, encode, decodeAudioData, createBlob } from './services/audio-he
 import VoiceVisualizer from './components/VoiceVisualizer';
 import TranscriptionList from './components/TranscriptionList';
 
-const MAX_RETRIES = 3;
-const RETRY_DELAY_BASE = 2000;
+const MAX_RETRIES = 2;
+const RETRY_DELAY_BASE = 1500;
 
 const App: React.FC = () => {
   const [status, setStatus] = useState<ConnectionStatus>(ConnectionStatus.IDLE);
   const [mode, setMode] = useState<AppMode>(AppMode.TRANSLATE);
+  const [errorMessage, setErrorMessage] = useState<string>('');
   
   const [translateHistory, setTranslateHistory] = useState<TranscriptionEntry[]>([]);
   const [chatHistory, setChatHistory] = useState<TranscriptionEntry[]>([]);
@@ -49,7 +50,6 @@ const App: React.FC = () => {
   }, []);
 
   const stopSession = useCallback(() => {
-    // Clear any pending retries immediately
     if (retryTimeoutRef.current) {
       window.clearTimeout(retryTimeoutRef.current);
       retryTimeoutRef.current = null;
@@ -58,13 +58,10 @@ const App: React.FC = () => {
     if (sessionRef.current) {
       try {
         sessionRef.current.close();
-      } catch (e) {
-        console.debug('Session close error handled');
-      }
+      } catch (e) {}
       sessionRef.current = null;
     }
 
-    // Stop all active audio sources
     sourcesRef.current.forEach(s => {
       try { s.stop(); } catch(e) {}
     });
@@ -72,13 +69,10 @@ const App: React.FC = () => {
 
     const closeCtx = (ctxRef: React.MutableRefObject<AudioContext | null>) => {
       if (ctxRef.current) {
-        const ctx = ctxRef.current;
-        if (ctx.state !== 'closed') {
+        if (ctxRef.current.state !== 'closed') {
           try {
-            ctx.close().catch(() => {});
-          } catch (e) {
-            console.debug('Context close handled');
-          }
+            ctxRef.current.close().catch(() => {});
+          } catch (e) {}
         }
         ctxRef.current = null;
       }
@@ -97,51 +91,59 @@ const App: React.FC = () => {
 
   const startSession = async () => {
     if (!isOnline) {
+      setErrorMessage('No internet connection.');
       setStatus(ConnectionStatus.ERROR);
       return;
     }
 
-    // Concurrency Lock: Prevent multiple connection attempts at once
     if (isConnectingRef.current) return;
     isConnectingRef.current = true;
+    setErrorMessage('');
 
     try {
-      if (retryCountRef.current === 0) {
-        setStatus(ConnectionStatus.CONNECTING);
-      } else {
-        setStatus(ConnectionStatus.RECONNECTING);
-      }
-      
-      const apiKey = process.env.API_KEY;
-      if (!apiKey) {
-        throw new Error("API Key is missing. Please check environment variables.");
+      // 1. Ensure clean slate
+      if (sessionRef.current) stopSession();
+
+      // 2. Check for API Key selection (fallback for entity not found errors)
+      if (typeof window !== 'undefined' && (window as any).aistudio) {
+        const hasKey = await (window as any).aistudio.hasSelectedApiKey();
+        if (!hasKey) {
+          await (window as any).aistudio.openSelectKey();
+        }
       }
 
+      const apiKey = process.env.API_KEY;
+      if (!apiKey) {
+        throw new Error("API Key missing. Configure in environment settings.");
+      }
+
+      setStatus(retryCountRef.current > 0 ? ConnectionStatus.RECONNECTING : ConnectionStatus.CONNECTING);
+      
       const ai = new GoogleGenAI({ apiKey });
       
-      // Initialize fresh Audio Contexts
-      inputAudioCtxRef.current = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 16000 });
-      outputAudioCtxRef.current = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 });
+      // Initialize Audio Contexts
+      const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
+      inputAudioCtxRef.current = new AudioCtx({ sampleRate: 16000 });
+      outputAudioCtxRef.current = new AudioCtx({ sampleRate: 24000 });
       
+      // Crucial: Resume contexts in case browser suspended them
+      await inputAudioCtxRef.current.resume();
+      await outputAudioCtxRef.current.resume();
+
       const stream = await navigator.mediaDevices.getUserMedia({ 
-        audio: { noiseSuppression: true, echoCancellation: true, autoGainControl: true, channelCount: 1 } 
+        audio: { noiseSuppression: true, echoCancellation: true, autoGainControl: true } 
       });
 
       const modeInstruction = mode === AppMode.TRANSLATE 
-        ? "PURE TRANSLATION MODE: You are a professional English-Filipino translator. Precision is priority. Output ONLY the translation without any conversational filler."
-        : `CHAT MODE: You are 'Salin', a bubbly Filipino-English bestie. Be lively, human-like, and use Filipino slang! ${isPoliteMode ? "Be a respectful sibling (use po/opo)." : "Be a casual friend."}`;
+        ? "PURE TRANSLATION MODE: Professional English-Filipino translator. No chatting. Output ONLY translation."
+        : `CHAT MODE: You are 'Salin', a lively Filipino-English bestie. Be human, warm, and use 'po/opo' if Polite Mode is on.`;
 
       const sessionPromise = ai.live.connect({
         model: 'gemini-2.5-flash-native-audio-preview-12-2025',
         config: {
           responseModalities: [Modality.AUDIO],
-          systemInstruction: `You are 'Salin'. ${modeInstruction}
-          WAKE PHRASES: "Hey Salin", "Hoy Salin", "Kamusta Salin", "What's up Salin".
-          Prefix output with: [HAPPY], [SAD], [ANGRY], [SURPRISED], or [COOL].
-          ${isPoliteMode ? "Always use 'po' and 'opo' in Filipino." : "Casual Filipino style."}`,
-          speechConfig: {
-            voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Kore' } },
-          },
+          systemInstruction: `You are 'Salin'. ${modeInstruction} Wake word: 'Hoy Salin'.`,
+          speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Kore' } } },
           outputAudioTranscription: {},
           inputAudioTranscription: {},
         },
@@ -162,9 +164,7 @@ const App: React.FC = () => {
               for (let i = 0; i < inputData.length; i++) sum += inputData[i] * inputData[i];
               setVolume(Math.sqrt(sum / inputData.length));
               const pcmBlob = createBlob(inputData);
-              sessionPromise.then(s => {
-                if (s) s.sendRealtimeInput({ media: pcmBlob });
-              }).catch(() => {});
+              sessionPromise.then(s => s && s.sendRealtimeInput({ media: pcmBlob })).catch(() => {});
             };
             
             source.connect(scriptProcessor);
@@ -172,18 +172,18 @@ const App: React.FC = () => {
           },
           onmessage: async (message) => {
             const base64Audio = message.serverContent?.modelTurn?.parts?.[0]?.inlineData?.data;
-            if (base64Audio && outputAudioCtxRef.current && outputAudioCtxRef.current.state !== 'closed') {
+            if (base64Audio && outputAudioCtxRef.current?.state !== 'closed') {
               setIsSpeaking(true);
-              const audioCtx = outputAudioCtxRef.current;
+              const audioCtx = outputAudioCtxRef.current!;
               nextStartTimeRef.current = Math.max(nextStartTimeRef.current, audioCtx.currentTime);
               const audioBuffer = await decodeAudioData(decode(base64Audio), audioCtx, 24000, 1);
               const source = audioCtx.createBufferSource();
               source.buffer = audioBuffer;
               source.connect(audioCtx.destination);
-              source.addEventListener('ended', () => {
+              source.onended = () => {
                 sourcesRef.current.delete(source);
                 if (sourcesRef.current.size === 0) setIsSpeaking(false);
-              });
+              };
               source.start(nextStartTimeRef.current);
               nextStartTimeRef.current += audioBuffer.duration;
               sourcesRef.current.add(source);
@@ -192,49 +192,25 @@ const App: React.FC = () => {
             if (message.serverContent?.inputTranscription) {
               const text = message.serverContent.inputTranscription.text.toLowerCase();
               transcriptionRef.current.input += text;
-              const wakeTriggers = ["hey salin", "hoy salin", "kamusta salin", "what's up salin"];
-              if (!isAwake && wakeTriggers.some(t => text.includes(t))) {
-                setIsAwake(true);
-                transcriptionRef.current.input = ''; 
-              }
+              if (!isAwake && text.includes("salin")) setIsAwake(true);
             }
             
             if (message.serverContent?.outputTranscription) {
-              const text = message.serverContent.outputTranscription.text;
-              transcriptionRef.current.output += text;
-              const moods = ['HAPPY', 'SAD', 'ANGRY', 'SURPRISED', 'COOL'] as const;
-              for (const m of moods) {
-                if (text.includes(`[${m}]`)) {
-                  setCurrentMood(m.toLowerCase() as any);
-                  break;
-                }
-              }
+              transcriptionRef.current.output += message.serverContent.outputTranscription.text;
             }
 
             if (message.serverContent?.turnComplete) {
-              const userText = transcriptionRef.current.input.trim();
-              let modelText = transcriptionRef.current.output.trim();
-              modelText = modelText.replace(/\[(HAPPY|SAD|ANGRY|SURPRISED|COOL|NEUTRAL)\]/gi, '').trim();
-
-              const currentActiveMode = mode;
-              const addEntry = (speaker: 'user' | 'model', text: string) => {
-                const entry: TranscriptionEntry = {
+              const uTxt = transcriptionRef.current.input.trim();
+              const mTxt = transcriptionRef.current.output.trim();
+              if ((uTxt && isAwake) || mTxt) {
+                const entry = (s: 'user'|'model', t: string): TranscriptionEntry => ({
                   id: Math.random().toString(36).substr(2, 9),
-                  speaker,
-                  text,
-                  timestamp: new Date(),
-                  mode: currentActiveMode
-                };
-                if (currentActiveMode === AppMode.TRANSLATE) {
-                  setTranslateHistory(prev => [...prev, entry]);
-                } else {
-                  setChatHistory(prev => [...prev, entry]);
-                }
-              };
-
-              if (userText && isAwake) addEntry('user', userText);
-              if (modelText) addEntry('model', modelText);
-              
+                  speaker: s, text: t, timestamp: new Date(), mode
+                });
+                const setter = mode === AppMode.TRANSLATE ? setTranslateHistory : setChatHistory;
+                if (uTxt && isAwake) setter(p => [...p, entry('user', uTxt)]);
+                if (mTxt) setter(p => [...p, entry('model', mTxt)]);
+              }
               transcriptionRef.current = { input: '', output: '' };
             }
 
@@ -245,34 +221,37 @@ const App: React.FC = () => {
               setIsSpeaking(false);
             }
           },
-          onerror: (e) => {
-            console.error('Salin Session Error:', e);
+          onerror: (e: any) => {
+            console.error('Session error:', e);
             isConnectingRef.current = false;
-            
+            if (e.message?.includes('entity was not found') && (window as any).aistudio) {
+               (window as any).aistudio.openSelectKey();
+            }
             if (retryCountRef.current < MAX_RETRIES) {
               retryCountRef.current++;
-              setStatus(ConnectionStatus.RECONNECTING);
-              const delay = RETRY_DELAY_BASE * Math.pow(2, retryCountRef.current - 1);
-              if (retryTimeoutRef.current) window.clearTimeout(retryTimeoutRef.current);
+              const delay = RETRY_DELAY_BASE * retryCountRef.current;
               retryTimeoutRef.current = window.setTimeout(() => startSession(), delay);
             } else {
+              setErrorMessage('Connection failed. Please check your API key and network.');
               setStatus(ConnectionStatus.ERROR);
               stopSession();
             }
           },
           onclose: () => {
-            if (status !== ConnectionStatus.ERROR && status !== ConnectionStatus.RECONNECTING) {
-              setStatus(ConnectionStatus.IDLE);
-              stopSession();
-            }
+            if (status !== ConnectionStatus.ERROR && status !== ConnectionStatus.RECONNECTING) stopSession();
           }
         }
       });
       sessionRef.current = await sessionPromise;
-    } catch (err) {
-      console.error('Failed to initiate Salin:', err);
+    } catch (err: any) {
+      console.error('Start error:', err);
       isConnectingRef.current = false;
       setStatus(ConnectionStatus.ERROR);
+      if (err.name === 'NotAllowedError') setErrorMessage('Microphone access denied.');
+      else setErrorMessage(err.message || 'Service unreachable.');
+    } finally {
+      // Safety: always ensure we aren't stuck in "connecting"
+      setTimeout(() => { if (status === ConnectionStatus.CONNECTING) isConnectingRef.current = false; }, 5000);
     }
   };
 
@@ -280,26 +259,18 @@ const App: React.FC = () => {
     if (status === ConnectionStatus.IDLE || status === ConnectionStatus.ERROR) {
       retryCountRef.current = 0;
       await startSession();
-    } else if (status === ConnectionStatus.CONNECTED || status === ConnectionStatus.RECONNECTING) {
+    } else if (status === ConnectionStatus.CONNECTED) {
       if (!isAwake) setIsAwake(true);
       else stopSession();
-    }
-  };
-
-  const togglePoliteMode = () => {
-    setIsPoliteMode(!isPoliteMode);
-    if (status === ConnectionStatus.CONNECTED || status === ConnectionStatus.RECONNECTING) {
-      stopSession();
-      setTimeout(() => startSession(), 300); // Slightly longer delay for cleanup
     }
   };
 
   const switchMode = (newMode: AppMode) => {
     if (newMode === mode) return;
     setMode(newMode);
-    if (status === ConnectionStatus.CONNECTED || status === ConnectionStatus.RECONNECTING) {
+    if (status === ConnectionStatus.CONNECTED) {
       stopSession();
-      setTimeout(() => startSession(), 300);
+      setTimeout(() => startSession(), 400);
     }
   };
 
@@ -307,82 +278,39 @@ const App: React.FC = () => {
     <div className="min-h-screen max-w-md mx-auto bg-gray-50 flex flex-col shadow-2xl overflow-hidden relative">
       <header className="bg-white/80 backdrop-blur-md px-6 py-4 flex items-center justify-between border-b border-gray-100 sticky top-0 z-20">
         <div className="flex items-center space-x-3">
-          <div className="w-10 h-10 bg-gradient-to-tr from-indigo-500 to-purple-600 rounded-xl flex items-center justify-center shadow-lg shadow-indigo-100">
+          <div className="w-10 h-10 bg-gradient-to-tr from-indigo-500 to-purple-600 rounded-xl flex items-center justify-center shadow-lg">
             <span className="text-white font-outfit font-bold text-xl">S</span>
           </div>
           <div>
-            <h1 className="font-outfit font-bold text-lg leading-tight text-gray-800 tracking-tight">Salin</h1>
+            <h1 className="font-outfit font-bold text-lg text-gray-800">Salin</h1>
             <div className="flex items-center space-x-1">
                <div className={`w-1.5 h-1.5 rounded-full ${isOnline ? 'bg-green-500' : 'bg-red-500'}`}></div>
-               <p className="text-[10px] text-gray-400 font-bold tracking-widest uppercase">{isOnline ? 'Online' : 'Offline'}</p>
+               <p className="text-[10px] text-gray-400 font-bold uppercase">{isOnline ? 'Online' : 'Offline'}</p>
             </div>
           </div>
         </div>
-        
-        <button 
-          onClick={togglePoliteMode}
-          className={`px-3 py-1.5 rounded-2xl flex items-center space-x-2 transition-all border ${
-            isPoliteMode ? 'bg-indigo-50 border-indigo-200 text-indigo-700' : 'bg-gray-50 border-gray-200 text-gray-400'
-          }`}
-        >
-          <div className={`w-2 h-2 rounded-full ${isPoliteMode ? 'bg-indigo-500' : 'bg-gray-300'}`} />
-          <span className="text-[10px] font-black uppercase tracking-widest">Po/Opo</span>
+        <button onClick={() => setIsPoliteMode(!isPoliteMode)} className={`px-3 py-1.5 rounded-2xl border transition-all ${isPoliteMode ? 'bg-indigo-50 border-indigo-200 text-indigo-700' : 'bg-gray-50 text-gray-400'}`}>
+          <span className="text-[10px] font-black uppercase">Po/Opo</span>
         </button>
       </header>
 
-      <div className="px-6 py-2 bg-white flex items-center justify-center border-b border-gray-100">
+      <div className="px-6 py-2 bg-white flex justify-center border-b border-gray-100">
         <div className="flex bg-gray-100 p-1 rounded-2xl w-full max-w-[280px]">
-          <button 
-            onClick={() => switchMode(AppMode.TRANSLATE)}
-            className={`flex-1 py-2 px-4 rounded-xl text-[10px] font-bold uppercase tracking-wider transition-all flex items-center justify-center space-x-2 ${
-              mode === AppMode.TRANSLATE ? 'bg-white text-indigo-600 shadow-sm' : 'text-gray-400'
-            }`}
-          >
-            <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="m5 8 6 6"/><path d="m4 14 6-6 2-3"/><path d="M2 5h12"/><path d="M7 2h1"/><path d="m22 22-5-10-5 10"/><path d="M14 18h6"/></svg>
-            <span>Translate</span>
-          </button>
-          <button 
-            onClick={() => switchMode(AppMode.CHAT)}
-            className={`flex-1 py-2 px-4 rounded-xl text-[10px] font-bold uppercase tracking-wider transition-all flex items-center justify-center space-x-2 ${
-              mode === AppMode.CHAT ? 'bg-white text-emerald-600 shadow-sm' : 'text-gray-400'
-            }`}
-          >
-            <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
-            <span>Chat</span>
-          </button>
+          <button onClick={() => switchMode(AppMode.TRANSLATE)} className={`flex-1 py-2 px-4 rounded-xl text-[10px] font-bold uppercase transition-all ${mode === AppMode.TRANSLATE ? 'bg-white text-indigo-600 shadow-sm' : 'text-gray-400'}`}>Translate</button>
+          <button onClick={() => switchMode(AppMode.CHAT)} className={`flex-1 py-2 px-4 rounded-xl text-[10px] font-bold uppercase transition-all ${mode === AppMode.CHAT ? 'bg-white text-emerald-600 shadow-sm' : 'text-gray-400'}`}>Chat</button>
         </div>
       </div>
 
-      {(status === ConnectionStatus.RECONNECTING || status === ConnectionStatus.ERROR || !isOnline) && (
-        <div className={`px-4 py-2 text-[10px] font-bold text-center uppercase tracking-widest border-b animate-pulse ${
-          status === ConnectionStatus.RECONNECTING ? 'bg-amber-50 text-amber-700 border-amber-100' : 
-          status === ConnectionStatus.ERROR ? 'bg-red-50 text-red-700 border-red-100' : 'bg-amber-50 text-amber-700 border-amber-100'
-        }`}>
-           {status === ConnectionStatus.RECONNECTING ? `⚠️ Reconnecting...` : 
-            status === ConnectionStatus.ERROR ? '⚠️ Service error. Try restarting.' : 
-            '⚠️ Checking connection...'}
+      {status === ConnectionStatus.ERROR && (
+        <div className="px-4 py-2 text-[10px] font-bold text-center uppercase bg-red-50 text-red-700 border-b border-red-100 animate-pulse">
+           ⚠️ {errorMessage || 'Service Error. Please check settings.'}
         </div>
       )}
 
       <main className="flex-1 flex flex-col z-10 overflow-hidden">
         <div className="bg-white/50 backdrop-blur-sm rounded-b-[48px] shadow-xl shadow-gray-100/50 mb-2 border-b border-white">
-          <VoiceVisualizer 
-            status={status} 
-            isActive={isSpeaking} 
-            isAwake={isAwake}
-            volume={volume} 
-            mood={currentMood}
-          />
+          <VoiceVisualizer status={status} isActive={isSpeaking} isAwake={isAwake} volume={volume} mood={currentMood} />
         </div>
-
-        {isPoliteMode && isAwake && (
-          <div className="px-6 mt-2 mb-1">
-             <div className="bg-indigo-50/50 border border-indigo-100 py-1.5 px-3 rounded-full flex items-center justify-center space-x-2 w-max mx-auto">
-                <span className="text-[9px] font-bold text-indigo-600 uppercase tracking-widest">Polite Mode ON</span>
-             </div>
-          </div>
-        )}
-
         <TranscriptionList entries={mode === AppMode.TRANSLATE ? translateHistory : chatHistory} />
       </main>
 
@@ -391,21 +319,19 @@ const App: React.FC = () => {
           <button
             onClick={handleToggleSession}
             disabled={status === ConnectionStatus.CONNECTING || !isOnline}
-            className={`w-full py-4 rounded-3xl font-outfit font-bold text-lg transition-all active:scale-95 shadow-xl flex items-center justify-center space-x-3 ${
-              status === ConnectionStatus.CONNECTED 
-                ? (isAwake ? 'bg-white text-slate-600 border border-slate-200' : (mode === AppMode.CHAT ? 'bg-emerald-600 text-white shadow-emerald-200' : 'bg-indigo-600 text-white shadow-indigo-200')) 
-                : status === ConnectionStatus.RECONNECTING ? 'bg-amber-500 text-white' :
-                  (mode === AppMode.CHAT ? 'bg-gradient-to-r from-emerald-600 via-teal-600 to-cyan-600 text-white' : 'bg-gradient-to-r from-indigo-600 via-purple-600 to-blue-600 text-white')
+            className={`w-full py-4 rounded-3xl font-outfit font-bold text-lg transition-all active:scale-95 shadow-xl ${
+              status === ConnectionStatus.CONNECTED ? (isAwake ? 'bg-white border border-slate-200 text-slate-600' : 'bg-indigo-600 text-white') :
+              status === ConnectionStatus.CONNECTING ? 'bg-gray-200 text-gray-500' : 'bg-gradient-to-r from-indigo-600 to-purple-600 text-white'
             }`}
           >
-            {status === ConnectionStatus.CONNECTING ? <span>Connecting...</span> : 
-             status === ConnectionStatus.RECONNECTING ? <span>Retrying...</span> :
-             status === ConnectionStatus.CONNECTED ? (isAwake ? <span>End Session</span> : <span>Wake Up</span>) :
-             <span>{status === ConnectionStatus.ERROR ? 'Try Again' : 'Start Session'}</span>}
+            {status === ConnectionStatus.CONNECTING ? 'Connecting...' : 
+             status === ConnectionStatus.RECONNECTING ? 'Retrying...' :
+             status === ConnectionStatus.CONNECTED ? (isAwake ? 'End Session' : 'Wake Up') :
+             'Try Again'}
           </button>
-          <div className="text-[10px] text-center text-slate-400 space-y-1 font-bold uppercase tracking-widest">
-            {isAwake ? (mode === AppMode.CHAT ? "Salin is listening!" : "Speak for translation...") : `"Hoy Salin!" to wake her up.`}
-          </div>
+          <p className="text-[10px] text-center text-slate-400 font-bold uppercase tracking-widest">
+            {isAwake ? "Salin is listening!" : "Tap to start or say 'Hoy Salin'"}
+          </p>
         </div>
       </footer>
     </div>
@@ -413,3 +339,4 @@ const App: React.FC = () => {
 };
 
 export default App;
+
