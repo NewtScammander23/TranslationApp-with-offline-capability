@@ -91,7 +91,7 @@ const App: React.FC = () => {
 
   const startSession = async () => {
     if (!isOnline) {
-      setErrorMessage('No internet connection.');
+      setErrorMessage('Offline: Check your internet.');
       setStatus(ConnectionStatus.ERROR);
       return;
     }
@@ -101,32 +101,31 @@ const App: React.FC = () => {
     setErrorMessage('');
 
     try {
-      // 1. Ensure clean slate
       if (sessionRef.current) stopSession();
-
-      // 2. Check for API Key selection (fallback for entity not found errors)
-      if (typeof window !== 'undefined' && (window as any).aistudio) {
-        const hasKey = await (window as any).aistudio.hasSelectedApiKey();
-        if (!hasKey) {
-          await (window as any).aistudio.openSelectKey();
-        }
-      }
 
       const apiKey = process.env.API_KEY;
       if (!apiKey) {
-        throw new Error("API Key missing. Configure in environment settings.");
+        // If API_KEY is missing, check if we can open the selection dialog
+        if (typeof window !== 'undefined' && (window as any).aistudio) {
+          const hasKey = await (window as any).aistudio.hasSelectedApiKey();
+          if (!hasKey) {
+            await (window as any).aistudio.openSelectKey();
+            isConnectingRef.current = false;
+            return; // Exit and let user try again after selecting key
+          }
+        } else {
+          throw new Error("Missing API_KEY. Add it to Vercel Environment Variables.");
+        }
       }
 
       setStatus(retryCountRef.current > 0 ? ConnectionStatus.RECONNECTING : ConnectionStatus.CONNECTING);
       
-      const ai = new GoogleGenAI({ apiKey });
+      const ai = new GoogleGenAI({ apiKey: apiKey || '' });
       
-      // Initialize Audio Contexts
       const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
       inputAudioCtxRef.current = new AudioCtx({ sampleRate: 16000 });
       outputAudioCtxRef.current = new AudioCtx({ sampleRate: 24000 });
       
-      // Crucial: Resume contexts in case browser suspended them
       await inputAudioCtxRef.current.resume();
       await outputAudioCtxRef.current.resume();
 
@@ -135,8 +134,8 @@ const App: React.FC = () => {
       });
 
       const modeInstruction = mode === AppMode.TRANSLATE 
-        ? "PURE TRANSLATION MODE: Professional English-Filipino translator. No chatting. Output ONLY translation."
-        : `CHAT MODE: You are 'Salin', a lively Filipino-English bestie. Be human, warm, and use 'po/opo' if Polite Mode is on.`;
+        ? "PURE TRANSLATION MODE: You are a translator. No chatting. Output ONLY the translation between English and Filipino."
+        : `CHAT MODE: You are 'Salin', a bubbly Filipino-English bestie. Be human-like and lively!`;
 
       const sessionPromise = ai.live.connect({
         model: 'gemini-2.5-flash-native-audio-preview-12-2025',
@@ -224,15 +223,20 @@ const App: React.FC = () => {
           onerror: (e: any) => {
             console.error('Session error:', e);
             isConnectingRef.current = false;
-            if (e.message?.includes('entity was not found') && (window as any).aistudio) {
-               (window as any).aistudio.openSelectKey();
+            
+            // Handle key issues by opening the key selector
+            if (e.message?.toLowerCase().includes('entity was not found') || e.message?.toLowerCase().includes('api key')) {
+              if (typeof window !== 'undefined' && (window as any).aistudio) {
+                (window as any).aistudio.openSelectKey();
+              }
             }
+
             if (retryCountRef.current < MAX_RETRIES) {
               retryCountRef.current++;
               const delay = RETRY_DELAY_BASE * retryCountRef.current;
               retryTimeoutRef.current = window.setTimeout(() => startSession(), delay);
             } else {
-              setErrorMessage('Connection failed. Please check your API key and network.');
+              setErrorMessage(e.message || 'Connection failed. Check settings.');
               setStatus(ConnectionStatus.ERROR);
               stopSession();
             }
@@ -247,11 +251,14 @@ const App: React.FC = () => {
       console.error('Start error:', err);
       isConnectingRef.current = false;
       setStatus(ConnectionStatus.ERROR);
-      if (err.name === 'NotAllowedError') setErrorMessage('Microphone access denied.');
-      else setErrorMessage(err.message || 'Service unreachable.');
+      if (err.name === 'NotAllowedError' || err.message?.includes('Permission denied')) {
+        setErrorMessage('Allow Microphone access to use Salin.');
+      } else {
+        setErrorMessage(err.message || 'Service unreachable.');
+      }
     } finally {
-      // Safety: always ensure we aren't stuck in "connecting"
-      setTimeout(() => { if (status === ConnectionStatus.CONNECTING) isConnectingRef.current = false; }, 5000);
+      // Safety release
+      setTimeout(() => { if (status === ConnectionStatus.CONNECTING) isConnectingRef.current = false; }, 8000);
     }
   };
 
@@ -262,15 +269,6 @@ const App: React.FC = () => {
     } else if (status === ConnectionStatus.CONNECTED) {
       if (!isAwake) setIsAwake(true);
       else stopSession();
-    }
-  };
-
-  const switchMode = (newMode: AppMode) => {
-    if (newMode === mode) return;
-    setMode(newMode);
-    if (status === ConnectionStatus.CONNECTED) {
-      stopSession();
-      setTimeout(() => startSession(), 400);
     }
   };
 
@@ -285,25 +283,25 @@ const App: React.FC = () => {
             <h1 className="font-outfit font-bold text-lg text-gray-800">Salin</h1>
             <div className="flex items-center space-x-1">
                <div className={`w-1.5 h-1.5 rounded-full ${isOnline ? 'bg-green-500' : 'bg-red-500'}`}></div>
-               <p className="text-[10px] text-gray-400 font-bold uppercase">{isOnline ? 'Online' : 'Offline'}</p>
+               <p className="text-[10px] text-gray-400 font-bold uppercase tracking-widest">{isOnline ? 'Online' : 'Offline'}</p>
             </div>
           </div>
         </div>
         <button onClick={() => setIsPoliteMode(!isPoliteMode)} className={`px-3 py-1.5 rounded-2xl border transition-all ${isPoliteMode ? 'bg-indigo-50 border-indigo-200 text-indigo-700' : 'bg-gray-50 text-gray-400'}`}>
-          <span className="text-[10px] font-black uppercase">Po/Opo</span>
+          <span className="text-[10px] font-black uppercase tracking-widest">Po/Opo</span>
         </button>
       </header>
 
       <div className="px-6 py-2 bg-white flex justify-center border-b border-gray-100">
         <div className="flex bg-gray-100 p-1 rounded-2xl w-full max-w-[280px]">
-          <button onClick={() => switchMode(AppMode.TRANSLATE)} className={`flex-1 py-2 px-4 rounded-xl text-[10px] font-bold uppercase transition-all ${mode === AppMode.TRANSLATE ? 'bg-white text-indigo-600 shadow-sm' : 'text-gray-400'}`}>Translate</button>
-          <button onClick={() => switchMode(AppMode.CHAT)} className={`flex-1 py-2 px-4 rounded-xl text-[10px] font-bold uppercase transition-all ${mode === AppMode.CHAT ? 'bg-white text-emerald-600 shadow-sm' : 'text-gray-400'}`}>Chat</button>
+          <button onClick={() => { if(mode!==AppMode.TRANSLATE){ setMode(AppMode.TRANSLATE); stopSession(); }}} className={`flex-1 py-2 px-4 rounded-xl text-[10px] font-bold uppercase transition-all ${mode === AppMode.TRANSLATE ? 'bg-white text-indigo-600 shadow-sm' : 'text-gray-400'}`}>Translate</button>
+          <button onClick={() => { if(mode!==AppMode.CHAT){ setMode(AppMode.CHAT); stopSession(); }}} className={`flex-1 py-2 px-4 rounded-xl text-[10px] font-bold uppercase transition-all ${mode === AppMode.CHAT ? 'bg-white text-emerald-600 shadow-sm' : 'text-gray-400'}`}>Chat</button>
         </div>
       </div>
 
       {status === ConnectionStatus.ERROR && (
-        <div className="px-4 py-2 text-[10px] font-bold text-center uppercase bg-red-50 text-red-700 border-b border-red-100 animate-pulse">
-           ⚠️ {errorMessage || 'Service Error. Please check settings.'}
+        <div className="px-4 py-3 text-[10px] font-bold text-center uppercase bg-red-50 text-red-700 border-b border-red-100">
+           ⚠️ {errorMessage || 'Service Error. Check settings.'}
         </div>
       )}
 
@@ -339,4 +337,3 @@ const App: React.FC = () => {
 };
 
 export default App;
-
